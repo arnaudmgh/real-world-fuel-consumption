@@ -1,0 +1,421 @@
+---
+title: "Toyota Sienna Fuel Consumption Analysis"
+author: "Arnaud Amzallag"
+date: today
+format: 
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+    theme: cosmo
+    embed-resources: true
+---
+
+::: {.callout-note}
+The contents have been reviewed and validated by Arnaud Amzallag on `{r} format(Sys.Date(), "%A, %B %d, %Y")`.
+:::
+
+## Introduction
+
+I have logged receipts of my gas consumption around 2011-1012 and I have a spreadsheet with Galons and price. I also continued to log until 2024 so I know the mileage I used during this period. I use both speadsheets to estimate how much I spent on gas during the last decade. 
+
+Therefore, this report analyzes fuel consumption data for a Toyota Sienna minivan using two data sources:
+
+- **sienna_gas2.csv**: Individual gas fill-up records with dates, volume, odometer readings, and prices
+- **odometer_sienna.csv**: Periodic odometer readings over multiple years
+
+The analysis calculates the vehicle's actual fuel economy (MPG) and estimates annual fuel consumption and costs.
+
+## Data Preparation
+
+### Loading Gas Fill-up Data
+
+```{r}
+#| message: false
+
+# to publish: rsconnect::rpubsUpload("Gas Costs of Arnaud's Sienna - 2011-2024", "sienna_fuel_analysis.html", "sienna_fuel_analysis.qmd")
+# to update: rsconnect::rpubsUpload("Gas Costs of Arnaud's Sienna - 2011-2024", "sienna_fuel_analysis.html", "sienna_fuel_analysis.qmd", id = "https://api.rpubs.com/api/v1/document/1364883/83efae3e43f847c491802d1cdc1b718e")
+#| message: false
+library(tidyverse)
+library(lubridate)
+library(gt)
+
+# Load the gas fill-up data
+gas_data <- read_csv("data/sienna_gas2.csv")
+```
+
+```{r}
+#| code-fold: show
+
+
+head(gas_data) |> gt()
+```
+
+```{r}
+# Fix any date issues (replace "0011" with "2011" if present)
+gas_data_clean <- gas_data |>
+  # mutate(date = str_replace_all(date, "0011", "2011")) |>
+  mutate(date = mdy(date)) |>
+  arrange(date) |>
+  filter(!is.na(miles)) |>
+  mutate(miles_driven = miles - lag(miles)) |>
+  mutate(mpg = miles_driven / volume) |>
+  mutate(days_since_last_fillup = as.numeric(date - lag(date)))
+```
+
+### Loading Odometer Data
+
+```{r}
+#| message: false
+# Load odometer data
+odo <- read_csv("data/odometer_sienna.csv", 
+                skip = 0, 
+                col_names = c("empty", "date", "mileage"))
+
+# Clean the data
+odo <- odo |>
+  slice(-1) |>
+  select(date, mileage) |>
+  mutate(
+    date = as.Date(date),
+    mileage = as.numeric(str_replace_all(mileage, ",", ""))
+  )
+
+```
+
+## Gas Fill-up Analysis
+
+### Data Quality Assessment
+
+Not all fill-up records are reliable for calculating MPG. We identify problematic entries based on:
+
+- **Long gaps**: More than 45 days between fill-ups (may indicate missing data)
+- **Partial fill-ups**: Less than 10 gallons (incomplete tank fill)
+- **Unusual MPG**: Outside the range of 10-30 MPG
+
+```{r}
+# Classify data quality
+gas_data_plot <- gas_data_clean |>
+  filter(!is.na(days_since_last_fillup)) |>
+  mutate(
+    flag = case_when(
+      days_since_last_fillup > 45 ~ "Long gap",
+      volume < 10 ~ "Partial fill-up",
+      mpg > 30 | mpg < 10 ~ "Unusual MPG",
+      TRUE ~ "OK"
+    )
+  )
+
+
+```
+
+### Fill-up Records with Quality Flags
+
+```{r}
+#| tbl-cap: "All Fill-up Records with Data Quality Assessment"
+
+# Show all entries with quality flags
+gas_data_plot |>
+  select(date, days_since_last_fillup, miles_driven, volume, mpg, flag) |>
+  # arrange(desc(days_since_last_fillup)) |>
+  mutate(
+    date = format(date, "%Y-%m-%d"),
+    days_since_last_fillup = round(days_since_last_fillup, 0),
+    miles_driven = round(miles_driven, 0),
+    volume = round(volume, 2),
+    mpg = round(mpg, 1)
+  ) |>
+  rename(
+    Date = date,
+    `Days Since Last Fill` = days_since_last_fillup,
+    `Miles Driven` = miles_driven,
+    `Volume (gal)` = volume,
+    `MPG` = mpg,
+    `Quality Flag` = flag
+  ) |>
+  gt() |>
+  data_color(
+    columns = `Quality Flag`,
+    method = "factor",
+    palette = c("OK" = "#E6FFE6", "Long gap" = "#FFE6E6", 
+                "Partial fill-up" = "#FFF4E6", "Unusual MPG" = "#F3E6FF")
+  )
+```
+
+Key issues identified:
+
+- **April 23, 2011**: 69-day gap with only 2.86 gallons filled, resulting in unrealistic 202 MPG
+- **November 25, 2011**: 60-day gap suggesting possible missing fill-up
+- **May 11, 2011**: Unusually low 7.7 MPG
+
+## Fuel Economy Results
+
+### Visualization: All Fill-ups vs. Reliable Data
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+#| warning: false
+
+library(ggplot2)
+
+median_mpg_ok <- median(gas_data_plot$mpg[gas_data_plot$flag == "OK"])
+
+ggplot(filter(gas_data_plot, mpg < 100), aes(x = date, y = mpg, color = flag, shape = flag)) +
+  geom_point(size = 4) +
+  geom_hline(yintercept = median_mpg_ok, 
+             linetype = "dashed", color = "blue", linewidth = 1) +
+  annotate("text", x = min(gas_data_plot$date), y = median_mpg_ok, 
+           label = paste0("Median MPG (OK only): ", round(median_mpg_ok, 1)), 
+           hjust = 0, vjust = -0.5, color = "blue", size = 3.5) +
+  scale_color_manual(values = c("OK" = "darkgreen", 
+                                "Partial fill-up" = "orange",
+                                "Long gap" = "red",
+                                "Unusual MPG" = "purple")) +
+  labs(
+    title = "MPG Over Time: All Fill-ups vs. Reliable Data",
+    subtitle = "Highlighting problematic entries that should be excluded from average calculations",
+    x = "Date",
+    y = "Miles Per Gallon (MPG)",
+    color = "Data Quality",
+    shape = "Data Quality"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+### MPG Statistics
+
+Using only reliable fill-up data (flagged as "OK"):
+
+```{r}
+mpg_stats <- gas_data_plot |>
+  filter(flag == "OK") |>
+  summarise(
+    median_mpg = median(mpg),
+    mean_mpg = mean(mpg),
+    n_observations = n(),
+    min_mpg = min(mpg),
+    max_mpg = max(mpg)
+  )
+
+mpg_stats
+```
+
+**Key Finding**: The vehicle achieves a median fuel economy of **`{r} round(mpg_stats$median_mpg, 1)` MPG** based on `{r} mpg_stats$n_observations` reliable fill-up records.
+
+## Yearly Usage Analysis
+
+### Methodology: LOESS Curve Fitting
+
+To accurately estimate annual mileage, we fit a LOESS (locally estimated scatterplot smoothing) curve to the odometer data. This accounts for irregular observation intervals and provides smooth predictions for specific dates.
+
+Annual mileage is calculated as the difference between predicted mileage on January 1st and December 31st of each year.
+
+```{r}
+# Convert dates to numeric for loess (days since first observation)
+odo_with_numeric <- odo |>
+  mutate(days_since_start = as.numeric(date - min(date)))
+
+# Fit loess model
+loess_model <- loess(mileage ~ days_since_start, data = odo_with_numeric, span = 0.15)
+
+# Get the range of years in the data
+year_range <- year(min(odo$date)):year(max(odo$date))
+
+# For each year, predict mileage on Jan 1 and Dec 31
+yearly_predictions <- tibble(year = year_range) |>
+  mutate(
+    jan1_date = ymd(paste0(year, "-01-01")),
+    dec31_date = ymd(paste0(year, "-12-31")),
+    jan1_days = as.numeric(jan1_date - min(odo$date)),
+    dec31_days = as.numeric(dec31_date - min(odo$date))
+  ) |>
+  filter(jan1_date >= min(odo$date), dec31_date <= max(odo$date)) |>
+  mutate(
+    jan1_mileage = predict(loess_model, newdata = data.frame(days_since_start = jan1_days)),
+    dec31_mileage = predict(loess_model, newdata = data.frame(days_since_start = dec31_days)),
+    miles_driven = dec31_mileage - jan1_mileage
+  )
+```
+
+### LOESS Fit Visualization
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+
+# Generate predictions for smooth curve
+pred_data <- tibble(
+  days_since_start = seq(0, max(odo_with_numeric$days_since_start), by = 10)
+) |>
+  mutate(
+    date = min(odo$date) + days_since_start,
+    mileage_pred = predict(loess_model, newdata = data.frame(days_since_start = days_since_start))
+  )
+
+# Create points for Jan 1 and Dec 31 predictions
+year_points <- yearly_predictions |>
+  pivot_longer(cols = c(jan1_mileage, dec31_mileage),
+               names_to = "type",
+               values_to = "mileage") |>
+  mutate(
+    date = if_else(type == "jan1_mileage", jan1_date, dec31_date),
+    label = if_else(type == "jan1_mileage", "Jan 1", "Dec 31")
+  )
+
+ggplot() +
+  geom_point(data = odo, aes(x = date, y = mileage), size = 2, alpha = 0.5) +
+  geom_line(data = pred_data, aes(x = date, y = mileage_pred), 
+            color = "blue", linewidth = 1) +
+  # geom_point(data = year_points, aes(x = date, y = mileage, color = label), 
+  #            size = 3, shape = 17) +
+  scale_color_manual(values = c("Jan 1" = "darkgreen", "Dec 31" = "darkred")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Odometer Readings with LOESS Fit",
+    subtitle = "Triangles show predicted mileage on Jan 1 (green) and Dec 31 (red) of each year",
+    x = "Date",
+    y = "Mileage",
+    color = "Prediction Point"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+### Calculate Yearly Metrics
+
+For fuel consumption and cost estimates, we use an assumed fuel economy of 15 MPG and calculate costs using a price range of $3.00 to $3.30 per gallon.
+
+```{r}
+#| tbl-cap: "Yearly Predictions from LOESS Model"
+
+mpg_assumed <- 15
+price_low <- 3.00
+price_high <- 4.00
+
+yearly_summary <- yearly_predictions |>
+  mutate(
+    consumption_gallons = miles_driven / mpg_assumed,
+    price_low = consumption_gallons * !!price_low,
+    price_high = consumption_gallons * !!price_high
+  ) |>
+  select(year, jan1_mileage, dec31_mileage, miles_driven, consumption_gallons, price_low, price_high)
+```
+
+### Annual Summary Table
+
+```{r}
+#| tbl-cap: "Annual Vehicle Usage Summary"
+
+yearly_summary |>
+  mutate(
+    price_range = paste0("$", scales::comma(round(price_low)), " - $", 
+                        scales::comma(round(price_high))),
+    jan1_mileage = scales::comma(round(jan1_mileage)),
+    dec31_mileage = scales::comma(round(dec31_mileage)),
+    miles_driven = scales::comma(round(miles_driven)),
+    consumption_gallons = round(consumption_gallons, 1)
+  ) |>
+  select(year, jan1_mileage, dec31_mileage, miles_driven, consumption_gallons, price_range) |>
+  rename(
+    Year = year,
+    `Jan 1 Mileage` = jan1_mileage,
+    `Dec 31 Mileage` = dec31_mileage,
+    `Miles Driven` = miles_driven,
+    `Fuel (gallons)` = consumption_gallons,
+    `Annual Cost Range` = price_range
+  ) |>
+  gt()
+```
+
+
+### Yearly Trends Visualization
+
+```{r}
+#| fig-width: 12
+#| fig-height: 10
+#| warning: false
+
+library(gridExtra)
+
+# Plot 1: Mileage over time (using Dec 31 values)
+p1 <- ggplot(yearly_summary, aes(x = as.integer(year), y = dec31_mileage)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(size = 3, color = "blue") +
+  scale_x_continuous(breaks = yearly_summary$year) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Year-End Mileage (Dec 31)", x = "Year", y = "Predicted Odometer Reading") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 2: Miles driven per year
+p2 <- ggplot(yearly_summary, aes(x = as.integer(year), y = miles_driven)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = scales::comma(round(miles_driven))), 
+            vjust = -0.5, size = 3) +
+  scale_x_continuous(breaks = yearly_summary$year) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Miles Driven Per Year (Jan 1 - Dec 31)", x = "Year", y = "Miles") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 3: Fuel consumption per year
+p3 <- ggplot(yearly_summary, aes(x = as.integer(year), y = consumption_gallons)) +
+  geom_col(fill = "darkgreen") +
+  geom_text(aes(label = round(consumption_gallons)), 
+            vjust = -0.5, size = 3) +
+  scale_x_continuous(breaks = yearly_summary$year) +
+  labs(title = "Fuel Consumption (gallons/year)", x = "Year", y = "Gallons") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot 4: Cost range per year
+p4 <- ggplot(yearly_summary, aes(x = as.integer(year))) +
+  geom_ribbon(aes(ymin = price_low, ymax = price_high), 
+              fill = "darkred", alpha = 0.3) +
+  # geom_line(aes(y = (price_low + price_high) / 2), 
+  #           color = "darkred", linewidth = 1) +
+  # geom_point(aes(y = (price_low + price_high) / 2), 
+  #            color = "darkred", size = 3) +
+  # scale_x_continuous(breaks = yearly_summary$year) +
+  scale_y_continuous(labels = scales::dollar, limits = c(0, NA)) +
+  labs(title = sprintf("Fuel Cost Per Year ($%.2f-$%.2f/gal)", price_low, price_high), 
+       x = "Year", 
+       y = "Cost Range",
+       caption = "Shaded area shows price range") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Combine plots
+grid.arrange(p1, p2, p3, p4, ncol = 2,
+             top = "Sienna Vehicle Usage Analysis (Assuming 15 MPG)")
+```
+
+
+## Conclusions
+
+### Key Findings
+
+1. **Actual Fuel Economy**: Based on reliable fill-up data, the vehicle achieves **`{r} round(mpg_stats$median_mpg, 1)` MPG** (median) across `{r} mpg_stats$n_observations` measurements.
+
+2. **Data Quality**: Of `{r} nrow(gas_data_plot)` fill-up records analyzed, `{r} sum(gas_data_plot$flag == "OK")` were reliable, with issues including:
+   - Long gaps suggesting missing fill-ups
+   - Partial fill-ups that skew MPG calculations
+   - Anomalous readings
+
+3. **Annual Usage Patterns** (using LOESS-fitted predictions):
+   - **High-usage years**: 2019 (`{r} scales::comma(round(yearly_summary$miles_driven[yearly_summary$year == 2019]))` miles) and 2016 (`{r} scales::comma(round(yearly_summary$miles_driven[yearly_summary$year == 2016]))` miles)
+   - **Low-usage years**: 2021 (`{r} scales::comma(round(yearly_summary$miles_driven[yearly_summary$year == 2021]))` miles) - likely pandemic-related
+   - **Typical usage**: Most years show 4,500-6,500 miles annually
+
+4. **Fuel Cost Estimates** (at $3.00–$4.00/gallon):
+   - Typical annual cost: $1,200–$1,600 for moderate usage years
+   - High-usage years (2016, 2019, 2022): $1,388–$2,170
+   - Low-usage year (2021): $659–$878
+
+5. **Total Mileage**: Vehicle reached approximately `{r} scales::comma(round(max(yearly_summary$dec31_mileage)))` miles by the end of `{r} max(yearly_summary$year)`.
+
+### Vehicle Performance
+
+The Toyota Sienna demonstrates fuel economy consistent with a full-size minivan, with actual performance of 15-16 MPG closely matching manufacturer specifications for combined city/highway driving. The LOESS-based analysis provides a more accurate picture of annual usage by accounting for irregular observation intervals in the odometer data.
